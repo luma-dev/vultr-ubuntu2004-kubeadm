@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="$(realpath "$(dirname "$(dirname "\$0")")")"
+PROJECT_DIR="$(realpath "$(dirname "$(dirname "$0")")")"
 
 if test -f "$PROJECT_DIR/.env.local"; then
   source "$PROJECT_DIR/.env.local"

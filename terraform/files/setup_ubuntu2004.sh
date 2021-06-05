@@ -89,8 +89,144 @@ echo 'export PATH="$PATH:/usr/local/go/bin"' >> "$HOME/.bashrc"
 export PATH="$PATH:/usr/local/go/bin"
 go version
 
-# docker
-sudo apt-get install -y docker.io
+
+# cri-o
+sudo apt-get install -y curl jq tar
+curl https://raw.githubusercontent.com/cri-o/cri-o/master/scripts/get | sudo bash
+
+
+sudo apt-get install -y apt-transport-https ca-certificates curl
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+
+sudo swapoff -a
+
+sudo kubeadm config images pull
+
+
+if ! test -d scripts; then
+  mkdir scripts
+fi
+
+cat <<'EOF' > ./scripts/kubeadm-init-master0.sh
+#!/bin/sh
+
+if test "$(hostname)" != master0; then
+  echo "error: do not use this script in nodes except master0"
+  exit 1
+fi
+
+sudo snap install --classic helm
+
+sudo kubeadm init \
+  --apiserver-advertise-address $PRIVATE_IP \
+  --control-plane-endpoint $PRIVATE_IP \
+  --pod-network-cidr=10.244.0.0/16 \
+  --upload-certs \
+  --ignore-preflight-errors=NumCPU,Mem
+
+mkdir -p "$HOME/.kube"
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown "$(id -u):$(id -g)" $HOME/.kube/config
+
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+kubectl taint nodes --all node-role.kubernetes.io/master-
+EOF
+
+
+cat <<'EOF' > ./scripts/kubeadm-join-control-plane.sh
+#!/bin/bash
+
+if test "$(hostname)" = master0; then
+  echo "error: do not use this script in master0"
+  exit 1
+fi
+
+if test "$(hostname)" = ^worker; then
+  echo "error: do not use this script in worker nodes"
+  exit 1
+fi
+
+if test -z "$@"; then
+  echo "info: usage: ./scripts/kubeadm-join-control-plane.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
+  exit 1
+fi
+
+sudo $@ \
+  --ignore-preflight-errors=NumCPU,Mem \
+  --skip-phases control-plane-join/etcd
+EOF
+
+
+cat <<'EOF' > ./scripts/kubeadm-join-worker.sh
+#!/bin/bash
+
+if test "$(hostname)" = ^master; then
+  echo "error: do not use this script in master nodes"
+  exit 1
+fi
+
+if test -z "$@"; then
+  echo "info: usage: ./scripts/kubeadm-join-worker.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
+  exit 1
+fi
+
+sudo $@ \
+  --ignore-preflight-errors=NumCPU,Mem
+EOF
+
+
+cat <<'EOF' > ./scripts/kubeadm-leave.sh
+#!/bin/bash
+
+sudo kubeadm reset --force
+sudo systemctl stop kubelet
+sudo systemctl stop docker
+sudo rm -rf /var/lib/cni/
+sudo rm -rf /var/lib/kubelet/*
+sudo rm -rf /etc/cni/
+sudo ifconfig cni0 down
+sudo ifconfig flannel.1 down
+sudo ifconfig docker0 down
+sudo ip link set cni0 down
+sudo brctl delbr cni0
+EOF
+
+cat <<'EOF' > ./scripts/show-crt-hash.sh
+#!/bin/bash
+
+if test ! "$(hostname)" = master0; then
+  echo "error: do not use this script in nodes except master0"
+  exit 1
+fi
+
+openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -pubkey \
+  | openssl rsa -pubin -outform der \
+  | openssl dgst -sha256 -hex
+EOF
+
+chmod +x ./scripts/*.sh
+
+}
+END_OF_WORK
+
+chown work:work /home/work/init.sh
+chmod +x /home/work/init.sh
+
+sudo -u work /bin/bash /home/work/init.sh
+
+
+## # docker
+## sudo apt-get install -y docker.io
+
+
+
+# /proc/sys/net/ipv4/ip_forward
+# --cri-socket /run/containerd/containerd.sock
+# --ignore-preflight-errors=NumCPU,Mem
 
 ## # containerd
 ## cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
@@ -132,82 +268,3 @@ sudo apt-get install -y docker.io
 ## sudo systemctl enable containerd.service
 ## sudo systemctl start containerd.service
 
-sudo apt-get install -y apt-transport-https ca-certificates curl
-sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
-echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt-get update
-sudo apt-get install -y kubelet kubeadm kubectl
-sudo apt-mark hold kubelet kubeadm kubectl
-
-sudo swapoff -a
-
-sudo kubeadm config images pull
-
-cat <<'EOF' > ./kubeadm-init.sh
-#!/bin/sh
-
-sudo kubeadm init \
-  --apiserver-advertise-address $PRIVATE_IP \
-  --control-plane-endpoint $PRIVATE_IP \
-  --pod-network-cidr=10.244.0.0/16 \
-  --ignore-preflight-errors=NumCPU,Mem
-
-mkdir -p "$HOME/.kube"
-sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-sudo chown "$(id -u):$(id -g)" $HOME/.kube/config
-
-kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
-EOF
-
-chmod +x ./kubeadm-init.sh
-
-
-cat <<'EOF' > ./kubeadm-leave.sh
-#!/bin/bash
-
-if test "$(hostname)" = master0; then
-  echo "error: do not use this script in master0"
-  exit 1
-fi
-
-sudo kubeadm reset --force
-sudo systemctl stop kubelet
-sudo systemctl stop docker
-sudo rm -rf /var/lib/cni/
-sudo rm -rf /var/lib/kubelet/*
-sudo rm -rf /etc/cni/
-sudo ifconfig cni0 down
-sudo ifconfig flannel.1 down
-sudo ifconfig docker0 down
-sudo ip link set cni0 down
-sudo brctl delbr cni0
-EOF
-
-chmod +x ./kubeadm-leave.sh
-
-cat <<'EOF' > ./show-crt-hash.sh
-#!/bin/bash
-
-if test ! "$(hostname)" = master0; then
-  echo "error: do not use this script in nodes except master0"
-  exit 1
-fi
-
-openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -pubkey \
-  | openssl rsa -pubin -outform der \
-  | openssl dgst -sha256 -hex
-EOF
-
-chmod +x ./show-crt-hash.sh
-
-}
-END_OF_WORK
-
-chown work:work /home/work/init.sh
-chmod +x /home/work/init.sh
-
-sudo -u work /bin/bash /home/work/init.sh
-
-# /proc/sys/net/ipv4/ip_forward
-# --cri-socket /run/containerd/containerd.sock
-# --ignore-preflight-errors=NumCPU
