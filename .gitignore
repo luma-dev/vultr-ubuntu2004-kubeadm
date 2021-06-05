@@ -1,0 +1,9 @@
+.terraform
+*.tfvars
+*.tfstate
+*.tfstate.*
+backend.tf
+
+/.tmp
+.env.local
+.env.*.local
