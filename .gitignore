@@ -4,6 +4,5 @@
 *.tfstate.*
 backend.tf
 
-/.tmp
 .env.local
 .env.*.local
