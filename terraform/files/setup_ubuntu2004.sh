@@ -27,15 +27,21 @@ service ssh reload
 
 # https://www.vultr.com/docs/how-to-configure-a-private-network-on-ubuntu
 # https://www.vultr.com/metadata/#using_the_api
-MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+: ens7:' -A 1 | tail -n 1 | awk '{ print $2 }')"
-PRIVATE_IP="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/address)"
-PRIVATE_IP_MASK="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/netmask)"
-PRIVATE_IP_MASK_NUM="$(ipv4mask_to_num "$PRIVATE_IP_MASK")"
-cat <<EOF >> "/home/work/.bashrc"
+export MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+: ens7:' -A 1 | tail -n 1 | awk '{ print $2 }')"
+export PRIVATE_IP="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/address)"
+export PRIVATE_IP_MASK="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/netmask)"
+export PRIVATE_IP_MASK_NUM="$(ipv4mask_to_num "$PRIVATE_IP_MASK")"
+# export CIDR=10.85.0.0/16  # cri-o
+export CIDR=10.244.0.0/16  # flannel
+cat <<'EOF' >> "/home/work/.bashrc"
+test -f "$HOME/bash_vars.sh" && source "$HOME/bash_vars.sh"
+EOF
+cat <<EOF > "/home/work/bash_vars.sh"
 export MAC_ADDR="$MAC_ADDR"
 export PRIVATE_IP="$PRIVATE_IP"
 export PRIVATE_IP_MASK="$PRIVATE_IP_MASK"
 export PRIVATE_IP_MASK_NUM="$PRIVATE_IP_MASK_NUM"
+export CIDR="$CIDR"
 EOF
 cat <<EOF >> /etc/netplan/10-ens7.yaml
 network:
@@ -56,6 +62,7 @@ cat <<'END_OF_INIT' > /home/work/init.sh
 {
 set -euo pipefail
 cd "$HOME"
+source "$HOME/bash_vars.sh"
 
 ## initialize
 sudo apt-get update
@@ -112,6 +119,33 @@ sudo sysctl --system
 
 sudo apt-get install -y curl jq tar
 curl https://raw.githubusercontent.com/cri-o/cri-o/master/scripts/get | sudo bash
+
+sudo rm -f /etc/cni/net.d/10-crio-*
+sudo rm -f /etc/cni/net.d/10-crio.*
+
+# cat <<EOF | sudo tee /etc/cni/net.d/09-crio.conf
+# {
+#     "cniVersion": "0.3.1",
+#     "name": "crio",
+#     "type": "flannel",
+#     "bridge": "cni0",
+#     "isGateway": true,
+#     "ipMasq": true,
+#     "hairpinMode": true,
+#     "ipam": {
+#         "type": "host-local",
+#         "routes": [
+#             { "dst": "0.0.0.0/0" },
+#             { "dst": "1100:200::1/24" }
+#         ],
+#         "ranges": [
+#             [{ "subnet": "$CIDR" }],
+#             [{ "subnet": "1100:200::/24" }]
+#         ]
+#     }
+# }
+# EOF
+
 sudo systemctl enable crio
 sudo systemctl start crio
 
@@ -145,15 +179,21 @@ sudo snap install --classic helm
 sudo kubeadm init \
   --apiserver-advertise-address $PRIVATE_IP \
   --control-plane-endpoint $PRIVATE_IP \
-  --pod-network-cidr=10.244.0.0/16 \
+  --pod-network-cidr=$CIDR \
   --upload-certs \
   --ignore-preflight-errors=NumCPU,Mem
 
 mkdir -p "$HOME/.kube"
-sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-sudo chown "$(id -u):$(id -g)" $HOME/.kube/config
+sudo cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
+sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 
 kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+# wget https://github.com/projectcalico/calico/releases/download/v3.19.1/tigera-operator-v3.19.1-2.tgz
+# helm install calico tigera-operator-v3.19.1-2.tgz
+# 
+# curl -o calicoctl -O -L  "https://github.com/projectcalico/calicoctl/releases/download/v3.19.1/calicoctl"
+# sudo install calicoctl /usr/local/bin/
 EOF
 
 
@@ -184,6 +224,10 @@ fi
 sudo $@ \
   --apiserver-advertise-address $PRIVATE_IP \
   --ignore-preflight-errors=NumCPU,Mem
+
+mkdir -p "$HOME/.kube"
+sudo cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
+sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 EOF
 
 
@@ -213,7 +257,8 @@ sudo systemctl stop kubelet
 sudo systemctl stop docker
 sudo rm -rf /var/lib/cni/
 sudo rm -rf /var/lib/kubelet/*
-sudo rm -rf /etc/cni/
+sudo rm -rf /etc/cni/10-flannel.*
+sudo rm -rf /etc/cni/10-flannel-*
 sudo ifconfig cni0 down
 sudo ifconfig flannel.1 down
 sudo ifconfig docker0 down
@@ -242,7 +287,7 @@ chmod +x ./scripts/*.sh
 
 
 if test "$(hostname)" = master0; then
-  ./scripts/kubeadm-init-master0.sh > init-out.log 2> init-err.log
+  ./scripts/kubeadm-init-master0.sh > kubeadm-init-out.log 2> kubeadm-init-err.log
 fi
 
 echo ok > ./ok
@@ -253,7 +298,7 @@ END_OF_INIT
 chown work:work /home/work/init.sh
 chmod +x /home/work/init.sh
 
-sudo -u work /bin/bash /home/work/init.sh
+sudo -u work /bin/bash /home/work/init.sh > /home/work/init-out.log 2> /home/work/init-err.log
 
 
 ## # docker
@@ -306,3 +351,23 @@ sudo -u work /bin/bash /home/work/init.sh
 ## sudo systemctl enable containerd.service
 ## sudo systemctl start containerd.service
 
+
+
+# cat <<EOF | kubectl apply -f -
+# # This section includes base Calico installation configuration.
+# # For more information, see: https://docs.projectcalico.org/v3.19/reference/installation/api#operator.tigera.io/v1.Installation
+# apiVersion: operator.tigera.io/v1
+# kind: Installation
+# metadata:
+#   name: default
+# spec:
+#   # Configures Calico networking.
+#   calicoNetwork:
+#     # Note: The ipPools section cannot be modified post-install.
+#     ipPools:
+#     - blockSize: 26
+#       cidr: $CIDR
+#       encapsulation: VXLANCrossSubnet
+#       natOutgoing: Enabled
+#       nodeSelector: all()
+# EOF
