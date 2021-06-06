@@ -52,7 +52,7 @@ EOF
 netplan apply
 }
 
-cat <<'END_OF_WORK' > /home/work/init.sh
+cat <<'END_OF_INIT' > /home/work/init.sh
 {
 set -euo pipefail
 cd "$HOME"
@@ -61,7 +61,7 @@ cd "$HOME"
 sudo apt-get update
 
 ## install network tools
-sudo apt-get install -y net-tools ifstat nmap
+sudo apt-get install -y net-tools ifstat nmap bridge-utils
 
 ## install necessary packages
 sudo apt-get install -y unzip
@@ -91,8 +91,29 @@ go version
 
 
 # cri-o
+
+# Create the .conf file to load the modules at bootup
+cat <<EOF | sudo tee /etc/modules-load.d/crio.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# Set up required sysctl params, these persist across reboots.
+cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+sudo sysctl --system
+
 sudo apt-get install -y curl jq tar
 curl https://raw.githubusercontent.com/cri-o/cri-o/master/scripts/get | sudo bash
+sudo systemctl enable crio
+sudo systemctl start crio
 
 
 sudo apt-get install -y apt-transport-https ca-certificates curl
@@ -133,7 +154,12 @@ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown "$(id -u):$(id -g)" $HOME/.kube/config
 
 kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+EOF
+
+
+cat <<'EOF' > ./scripts/use-masters-for-schedule.sh
 kubectl taint nodes --all node-role.kubernetes.io/master-
+kubectl describe nodes | grep Taints
 EOF
 
 
@@ -150,14 +176,14 @@ if test "$(hostname)" = ^worker; then
   exit 1
 fi
 
-if test -z "$@"; then
+if test -z "$(echo -n $@)"; then
   echo "info: usage: ./scripts/kubeadm-join-control-plane.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
   exit 1
 fi
 
 sudo $@ \
-  --ignore-preflight-errors=NumCPU,Mem \
-  --skip-phases control-plane-join/etcd
+  --apiserver-advertise-address $PRIVATE_IP \
+  --ignore-preflight-errors=NumCPU,Mem
 EOF
 
 
@@ -192,7 +218,11 @@ sudo ifconfig cni0 down
 sudo ifconfig flannel.1 down
 sudo ifconfig docker0 down
 sudo ip link set cni0 down
+sudo ip link set flannel.1 down
+sudo ip link delete cni0
+sudo ip link delete flannel.1
 sudo brctl delbr cni0
+sudo brctl delbr flannel.1
 EOF
 
 cat <<'EOF' > ./scripts/show-crt-hash.sh
@@ -211,7 +241,7 @@ EOF
 chmod +x ./scripts/*.sh
 
 }
-END_OF_WORK
+END_OF_INIT
 
 chown work:work /home/work/init.sh
 chmod +x /home/work/init.sh
@@ -226,6 +256,7 @@ sudo -u work /bin/bash /home/work/init.sh
 
 # /proc/sys/net/ipv4/ip_forward
 # --cri-socket /run/containerd/containerd.sock
+# --cri-socket /var/run/crio/crio.sock
 # --ignore-preflight-errors=NumCPU,Mem
 
 ## # containerd
