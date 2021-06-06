@@ -195,7 +195,7 @@ if test "$(hostname)" = ^master; then
   exit 1
 fi
 
-if test -z "$@"; then
+if test -z "$(echo -n $@)"; then
   echo "info: usage: ./scripts/kubeadm-join-worker.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
   exit 1
 fi
@@ -239,6 +239,13 @@ openssl x509 -in /etc/kubernetes/pki/ca.crt -noout -pubkey \
 EOF
 
 chmod +x ./scripts/*.sh
+
+
+if test "$(hostname)" = master0; then
+  ./scripts/kubeadm-init-master0.sh > init-out.log 2> init-err.log
+fi
+
+echo ok > ./ok
 
 }
 END_OF_INIT
