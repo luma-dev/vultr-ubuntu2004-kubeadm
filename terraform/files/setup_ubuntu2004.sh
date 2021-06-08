@@ -28,20 +28,48 @@ service ssh reload
 # https://www.vultr.com/docs/how-to-configure-a-private-network-on-ubuntu
 # https://www.vultr.com/metadata/#using_the_api
 export MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+: ens7:' -A 1 | tail -n 1 | awk '{ print $2 }')"
-export PRIVATE_IP="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/address)"
-export PRIVATE_IP_MASK="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/netmask)"
-export PRIVATE_IP_MASK_NUM="$(ipv4mask_to_num "$PRIVATE_IP_MASK")"
-# export CIDR=10.85.0.0/16  # cri-o
-export CIDR=10.244.0.0/16  # flannel
+
+export PUBLIC_IP4="$(curl http://169.254.169.254/v1/interfaces/0/ipv4/address)"
+export PUBLIC_IP4_MASK="$(curl http://169.254.169.254/v1/interfaces/0/ipv4/netmask)"
+export PUBLIC_IP4_MASK_NUM="$(ipv4mask_to_num "$PUBLIC_IP4_MASK")"
+
+export PUBLIC_IP6="$(curl http://169.254.169.254/v1/interfaces/0/ipv6/address)"
+export PUBLIC_IP6_PREFIX="$(curl http://169.254.169.254/v1/interfaces/0/ipv6/prefix)"
+
+export PRIVATE_IP4="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/address)"
+export PRIVATE_IP4_MASK="$(curl http://169.254.169.254/v1/interfaces/1/ipv4/netmask)"
+export PRIVATE_IP4_MASK_NUM="$(ipv4mask_to_num "$PRIVATE_IP4_MASK")"
+
+# flannel
+# NOTE: This is defined in https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+export POD_CIDR_V4=10.244.0.0/16
+export POD_CIDR_V6=2001:db8:42:0::/56
+
+export SVC_CIDR_V4=10.96.0.0/16
+export SVC_CIDR_V6=2001:db8:42:1::/112
+
 cat <<'EOF' >> "/home/work/.bashrc"
 test -f "$HOME/bash_vars.sh" && source "$HOME/bash_vars.sh"
 EOF
 cat <<EOF > "/home/work/bash_vars.sh"
 export MAC_ADDR="$MAC_ADDR"
-export PRIVATE_IP="$PRIVATE_IP"
-export PRIVATE_IP_MASK="$PRIVATE_IP_MASK"
-export PRIVATE_IP_MASK_NUM="$PRIVATE_IP_MASK_NUM"
-export CIDR="$CIDR"
+
+export PUBLIC_IP4="$PUBLIC_IP4"
+export PUBLIC_IP4_MASK="$PUBLIC_IP4_MASK"
+export PUBLIC_IP4_MASK_NUM="$PUBLIC_IP4_MASK_NUM"
+
+export PUBLIC_IP6="$PUBLIC_IP6"
+export PUBLIC_IP6_PREFIX="$PUBLIC_IP6_PREFIX"
+
+export PRIVATE_IP4="$PRIVATE_IP4"
+export PRIVATE_IP4_MASK="$PRIVATE_IP4_MASK"
+export PRIVATE_IP4_MASK_NUM="$PRIVATE_IP4_MASK_NUM"
+
+export POD_CIDR_V4="$POD_CIDR_V4"
+export POD_CIDR_V6="$POD_CIDR_V6"
+
+export SVC_CIDR_V4="$SVC_CIDR_V4"
+export SVC_CIDR_V6="$SVC_CIDR_V6"
 EOF
 cat <<EOF >> /etc/netplan/10-ens7.yaml
 network:
@@ -53,7 +81,7 @@ network:
         macaddress: ${MAC_ADDR}
       mtu: 1450
       dhcp4: no
-      addresses: [${PRIVATE_IP}/${PRIVATE_IP_MASK_NUM}]
+      addresses: [${PRIVATE_IP4}/${PRIVATE_IP4_MASK_NUM}]
 EOF
 netplan apply
 }
@@ -84,6 +112,7 @@ cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables  = 1
 net.ipv4.ip_forward                 = 1
+net.ipv6.conf.all.forwarding        = 1
 EOF
 sudo sysctl --system
 
@@ -95,6 +124,13 @@ rm -f "go${GO_VERSION}.linux-amd64.tar.gz"
 echo 'export PATH="$PATH:/usr/local/go/bin"' >> "$HOME/.bashrc"
 export PATH="$PATH:/usr/local/go/bin"
 go version
+
+
+# kubelet ipv6 configuration
+
+cat <<EOF | sudo tee /etc/default/kubelet
+KUBELET_EXTRA_ARGS=--node-ip=$PRIVATE_IP4,$PUBLIC_IP6
+EOF
 
 
 # cri-o
@@ -139,7 +175,7 @@ sudo rm -f /etc/cni/net.d/10-crio.*
 #             { "dst": "1100:200::1/24" }
 #         ],
 #         "ranges": [
-#             [{ "subnet": "$CIDR" }],
+#             [{ "subnet": "$POD_CIDR_V4" }],
 #             [{ "subnet": "1100:200::/24" }]
 #         ]
 #     }
@@ -177,9 +213,10 @@ fi
 sudo snap install --classic helm
 
 sudo kubeadm init \
-  --apiserver-advertise-address $PRIVATE_IP \
-  --control-plane-endpoint $PRIVATE_IP \
-  --pod-network-cidr=$CIDR \
+  --apiserver-advertise-address $PRIVATE_IP4 \
+  --control-plane-endpoint $PRIVATE_IP4 \
+  --pod-network-cidr="$POD_CIDR_V4,$POD_CIDR_V6" \
+  --service-cidr="$SVC_CIDR_V4,$SVC_CIDR_V6" \
   --upload-certs \
   --ignore-preflight-errors=NumCPU,Mem
 
@@ -187,19 +224,39 @@ mkdir -p "$HOME/.kube"
 sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
 sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 
-kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+# kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
 
-# wget https://github.com/projectcalico/calico/releases/download/v3.19.1/tigera-operator-v3.19.1-2.tgz
-# helm install calico tigera-operator-v3.19.1-2.tgz
-# 
-# curl -o calicoctl -O -L  "https://github.com/projectcalico/calicoctl/releases/download/v3.19.1/calicoctl"
-# sudo install calicoctl /usr/local/bin/
+./scripts/install-calico-master0.sh
+EOF
+
+
+cat <<'EOF' > ./scripts/install-calico-master0.sh
+#!/bin/bash
+
+if test "$(hostname)" != master0; then
+  echo "error: do not use this script in nodes except master0"
+  exit 1
+fi
+
+kubectl apply -f https://raw.githubusercontent.com/luma-dev/k8s-manifests/main/calico-kubeadm-dualstack-vultr-private.yaml
 EOF
 
 
 cat <<'EOF' > ./scripts/use-masters-for-schedule.sh
 kubectl taint nodes --all node-role.kubernetes.io/master-
 kubectl describe nodes | grep Taints
+EOF
+
+
+cat <<'EOF' > ./scripts/_kubeadm_input.sh
+IS_KUBEADM_JOIN=
+if [[ "$INPUT" =~ kubeadm[[:space:]]+join([[:space:]]|$) ]]; then
+  IS_KUBEADM_JOIN=1
+fi
+IS_KUBEADM_JOIN_CONTROL_PLANE=
+if [[ "$INPUT" =~ kubeadm[[:space:]]+join[[:space:]]+.*[[:space:]]--control-plane ]]; then
+  IS_KUBEADM_JOIN_CONTROL_PLANE=1
+fi
 EOF
 
 
@@ -216,13 +273,25 @@ if test "$(hostname)" = ^worker; then
   exit 1
 fi
 
-if test -z "$(echo -n $@)"; then
-  echo "info: usage: ./scripts/kubeadm-join-control-plane.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
+SCRIPT_DIR="$(realpath "$(dirname "$0")")"
+
+INPUT="$(echo -n $@)"
+source "$SCRIPT_DIR/_kubeadm_input.sh"
+
+
+if test -z "$IS_KUBEADM_JOIN"; then
+  echo "error: invalid input"
+  echo "info: usage: ./scripts/kubeadm-join-control-plane.sh {{ paste here 'kubeadm join ... --control-plane ...' dropped by primary control plane }}"
+  exit 1
+fi
+
+if test -z "$IS_KUBEADM_JOIN_CONTROL_PLANE"; then
+  echo "error: supply join command for control plane"
   exit 1
 fi
 
 sudo $@ \
-  --apiserver-advertise-address $PRIVATE_IP \
+  --apiserver-advertise-address $PRIVATE_IP4 \
   --ignore-preflight-errors=NumCPU,Mem
 
 mkdir -p "$HOME/.kube"
@@ -239,8 +308,19 @@ if test "$(hostname)" = ^master; then
   exit 1
 fi
 
-if test -z "$(echo -n $@)"; then
-  echo "info: usage: ./scripts/kubeadm-join-worker.sh {{ paste here 'kubeadm join ...' dropped by first control plane }}"
+SCRIPT_DIR="$(realpath "$(dirname "$0")")"
+
+INPUT="$(echo -n $@)"
+source "$SCRIPT_DIR/_kubeadm_input.sh"
+
+if test -z "$IS_KUBEADM_JOIN"; then
+  echo "error: invalid input"
+  echo "info: usage: ./scripts/kubeadm-join-worker.sh {{ paste here 'kubeadm join ...' dropped by primary control plane }}"
+  exit 1
+fi
+
+if test -n "$IS_KUBEADM_JOIN_CONTROL_PLANE"; then
+  echo "error: supply join command for worker node"
   exit 1
 fi
 
@@ -290,7 +370,7 @@ if test "$(hostname)" = master0; then
   ./scripts/kubeadm-init-master0.sh > kubeadm-init-out.log 2> kubeadm-init-err.log
 fi
 
-echo ok > ./ok
+echo "$(date): all ok" >> ./ok
 
 }
 END_OF_INIT
@@ -366,7 +446,7 @@ sudo -u work /bin/bash /home/work/init.sh > /home/work/init-out.log 2> /home/wor
 #     # Note: The ipPools section cannot be modified post-install.
 #     ipPools:
 #     - blockSize: 26
-#       cidr: $CIDR
+#       cidr: $POD_CIDR_V4
 #       encapsulation: VXLANCrossSubnet
 #       natOutgoing: Enabled
 #       nodeSelector: all()
