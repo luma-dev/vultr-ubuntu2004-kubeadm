@@ -34,7 +34,27 @@ resource "vultr_firewall_rule" "fw_allow_ssh_v6" {
   subnet            = "::"
   subnet_size       = 0
   port              = "22"
-  notes             = "allow icmp ipv6 from anywhere"
+  notes             = "allow ssh ipv6 from anywhere"
+}
+
+resource "vultr_firewall_rule" "fw_allow_wireguard_v4" {
+  firewall_group_id = vultr_firewall_group.fw.id
+  protocol          = "udp"
+  ip_type           = "v4"
+  subnet            = "0.0.0.0"
+  subnet_size       = 0
+  port              = "51820"
+  notes             = "allow wireguard ipv4 from anywhere"
+}
+
+resource "vultr_firewall_rule" "fw_allow_wireguard_v6" {
+  firewall_group_id = vultr_firewall_group.fw.id
+  protocol          = "udp"
+  ip_type           = "v6"
+  subnet            = "::"
+  subnet_size       = 0
+  port              = "51820"
+  notes             = "allow wireguard ipv6 from anywhere"
 }
 
 resource "vultr_firewall_rule" "fw_allow_icmp_v4" {
@@ -43,7 +63,7 @@ resource "vultr_firewall_rule" "fw_allow_icmp_v4" {
   ip_type           = "v4"
   subnet            = "0.0.0.0"
   subnet_size       = 0
-  notes             = "allow ssh ipv4 from anywhere"
+  notes             = "allow icmp ipv4 from anywhere"
 }
 
 resource "vultr_firewall_rule" "fw_allow_icmp_v6" {
