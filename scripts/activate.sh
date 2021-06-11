@@ -1,7 +1,5 @@
-PROJECT_DIR="$(realpath "$(dirname "$(dirname "\$0")")")"
-
 defs=$( \
-  terraform -chdir="$PROJECT_DIR/terraform" output -json host_v4_list \
+  terraform output -json host_v4_list \
   | jq \
   -r '
     . as $root

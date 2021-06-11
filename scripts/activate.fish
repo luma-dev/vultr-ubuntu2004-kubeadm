@@ -1,7 +1,5 @@
-set -l PROJECT_DIR (realpath (dirname (dirname (status --current-filename))))
-
 set -l defs ( \
-  terraform -chdir="$PROJECT_DIR/terraform" output -json host_v4_list \
+  terraform output -json host_v4_list \
   | jq \
   -r '
     . as $root
