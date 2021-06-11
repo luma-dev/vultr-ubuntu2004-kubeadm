@@ -27,7 +27,8 @@ service ssh reload
 
 # https://www.vultr.com/docs/how-to-configure-a-private-network-on-ubuntu
 # https://www.vultr.com/metadata/#using_the_api
-export MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+: ens7:' -A 1 | tail -n 1 | awk '{ print $2 }')"
+export MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+:' -A 1 | tail -n 1 | awk '{ print $2 }')"
+export MAC_ADDR="$(curl http://169.254.169.254/v1/interfaces/1/mac)"
 
 export PUBLIC_IP4="$(curl http://169.254.169.254/v1/interfaces/0/ipv4/address)"
 export PUBLIC_IP4_MASK="$(curl http://169.254.169.254/v1/interfaces/0/ipv4/netmask)"
@@ -158,29 +159,7 @@ curl https://raw.githubusercontent.com/cri-o/cri-o/master/scripts/get | sudo bas
 
 sudo rm -f /etc/cni/net.d/10-crio-*
 sudo rm -f /etc/cni/net.d/10-crio.*
-
-# cat <<EOF | sudo tee /etc/cni/net.d/09-crio.conf
-# {
-#     "cniVersion": "0.3.1",
-#     "name": "crio",
-#     "type": "flannel",
-#     "bridge": "cni0",
-#     "isGateway": true,
-#     "ipMasq": true,
-#     "hairpinMode": true,
-#     "ipam": {
-#         "type": "host-local",
-#         "routes": [
-#             { "dst": "0.0.0.0/0" },
-#             { "dst": "1100:200::1/24" }
-#         ],
-#         "ranges": [
-#             [{ "subnet": "$POD_CIDR_V4" }],
-#             [{ "subnet": "1100:200::/24" }]
-#         ]
-#     }
-# }
-# EOF
+echo "unqualified-search-registries = ['docker.io']" | sudo tee /etc/containers/registries.conf
 
 sudo systemctl enable crio
 sudo systemctl start crio
@@ -210,6 +189,8 @@ if test "$(hostname)" != master0; then
   exit 1
 fi
 
+SCRIPT_DIR="$(realpath "$(dirname "$0")")"
+
 sudo snap install --classic helm
 
 sudo kubeadm init \
@@ -226,7 +207,8 @@ sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 
 # kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
 
-./scripts/install-calico-master0.sh
+bash "$SCRIPT_DIR/untaint-masters-for-schedule.sh"
+bash "$SCRIPT_DIR/install-calico-master0.sh"
 EOF
 
 
@@ -242,7 +224,7 @@ kubectl apply -f https://raw.githubusercontent.com/luma-dev/k8s-manifests/main/c
 EOF
 
 
-cat <<'EOF' > ./scripts/use-masters-for-schedule.sh
+cat <<'EOF' > ./scripts/untaint-masters-for-schedule.sh
 kubectl taint nodes --all node-role.kubernetes.io/master-
 kubectl describe nodes | grep Taints
 EOF
@@ -297,6 +279,8 @@ sudo $@ \
 mkdir -p "$HOME/.kube"
 sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
 sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
+
+bash "$SCRIPT_DIR/untaint-masters-for-schedule.sh"
 EOF
 
 
@@ -379,75 +363,3 @@ chown work:work /home/work/init.sh
 chmod +x /home/work/init.sh
 
 sudo -u work /bin/bash /home/work/init.sh > /home/work/init-out.log 2> /home/work/init-err.log
-
-
-## # docker
-## sudo apt-get install -y docker.io
-
-
-
-# /proc/sys/net/ipv4/ip_forward
-# --cri-socket /run/containerd/containerd.sock
-# --cri-socket /var/run/crio/crio.sock
-# --ignore-preflight-errors=NumCPU,Mem
-
-## # containerd
-## cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
-## overlay
-## br_netfilter
-## EOF
-## 
-## sudo modprobe overlay
-## sudo modprobe br_netfilter
-## 
-## cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
-## net.bridge.bridge-nf-call-iptables  = 1
-## net.bridge.bridge-nf-call-ip6tables = 1
-## net.ipv4.ip_forward                 = 1
-## EOF
-## 
-## # Apply sysctl params without reboot
-## sudo sysctl --system
-## 
-## CONTAINERD_VERSION="1.5.0"
-## wget "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
-## tar xvf "containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
-## sudo cp ./bin/containerd /usr/local/bin
-## rm -f "containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
-## rm -rf bin
-## 
-## wget "https://github.com/containerd/containerd/archive/v${CONTAINERD_VERSION}.zip"
-## unzip "v${CONTAINERD_VERSION}.zip"
-## sudo cp "containerd-${CONTAINERD_VERSION}/containerd.service" /etc/systemd/system
-## rm -f "v${CONTAINERD_VERSION}.zip"
-## rm -rf "containerd-${CONTAINERD_VERSION}"
-## sudo chmod 755 /etc/systemd/system/containerd.service
-## 
-## containerd config default \
-##   | sed \
-##   -e 's/SystemdCgroup\s\+=\s\+false/SystemdCgroup = true/' \
-##   | sudo tee /etc/containerd/config.toml
-## 
-## sudo systemctl enable containerd.service
-## sudo systemctl start containerd.service
-
-
-
-# cat <<EOF | kubectl apply -f -
-# # This section includes base Calico installation configuration.
-# # For more information, see: https://docs.projectcalico.org/v3.19/reference/installation/api#operator.tigera.io/v1.Installation
-# apiVersion: operator.tigera.io/v1
-# kind: Installation
-# metadata:
-#   name: default
-# spec:
-#   # Configures Calico networking.
-#   calicoNetwork:
-#     # Note: The ipPools section cannot be modified post-install.
-#     ipPools:
-#     - blockSize: 26
-#       cidr: $POD_CIDR_V4
-#       encapsulation: VXLANCrossSubnet
-#       natOutgoing: Enabled
-#       nodeSelector: all()
-# EOF
