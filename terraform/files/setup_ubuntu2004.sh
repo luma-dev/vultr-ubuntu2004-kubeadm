@@ -27,7 +27,6 @@ service ssh reload
 
 # https://www.vultr.com/docs/how-to-configure-a-private-network-on-ubuntu
 # https://www.vultr.com/metadata/#using_the_api
-export MAC_ADDR="$(ip addr | grep '^[[:digit:]]\+:' -A 1 | tail -n 1 | awk '{ print $2 }')"
 export MAC_ADDR="$(curl http://169.254.169.254/v1/interfaces/1/mac)"
 
 export PUBLIC_IP4="$(curl http://169.254.169.254/v1/interfaces/0/ipv4/address)"
